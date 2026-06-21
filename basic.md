@@ -1,0 +1,105 @@
+# Most basic HLO snippet of a transformer block
+
+## Assumptions:
+* d_model = 256
+* d_head = 64
+  * num_heads = 4
+* Batch size = B
+* Sequence length = S
+* MLP hidden size = 1024 (4× expansion)
+* Ignore dropout, residuals, and layernorm initially to keep it minimal.
+
+## A simplified transformer block in HLO-like syntax looks like
+```
+ENTRY transformer_block {
+
+  %x = f32[B,S,256] parameter(0)
+
+  // QKV projections
+  %Wq = f32[256,256] parameter(1)
+  %Wk = f32[256,256] parameter(2)
+  %Wv = f32[256,256] parameter(3)
+
+  %Q = dot(%x, %Wq)
+       lhs_contracting_dims={2}
+       rhs_contracting_dims={0}
+  // [B,S,256]
+
+  %K = dot(%x, %Wk)
+  // [B,S,256]
+
+  %V = dot(%x, %Wv)
+  // [B,S,256]
+
+  // Split heads
+  %Qh = reshape(%Q)
+        // [B,S,4,64]
+
+  %Kh = reshape(%K)
+        // [B,S,4,64]
+
+  %Vh = reshape(%V)
+        // [B,S,4,64]
+
+  // Move head before sequence
+  %Qht = transpose(%Qh), dimensions={0,2,1,3}
+  // [B,4,S,64]
+
+  %Kht = transpose(%Kh), dimensions={0,2,1,3}
+  // [B,4,S,64]
+
+  %Vht = transpose(%Vh), dimensions={0,2,1,3}
+  // [B,4,S,64]
+
+  // Attention scores
+  %Scores =
+      dot(%Qht, %Kht)
+      lhs_contracting_dims={3}
+      rhs_contracting_dims={3}
+  // [B,4,S,S]
+
+  %Scale = constant(0.125)   // 1/sqrt(64)
+
+  %ScaledScores = multiply(%Scores, %Scale)
+
+  %Prob = softmax(%ScaledScores)
+  // [B,4,S,S]
+
+  %Context =
+      dot(%Prob, %Vht)
+      lhs_contracting_dims={3}
+      rhs_contracting_dims={2}
+  // [B,4,S,64]
+
+  %ContextT =
+      transpose(%Context), dimensions={0,2,1,3}
+  // [B,S,4,64]
+
+  %AttnOut =
+      reshape(%ContextT)
+  // [B,S,256]
+
+  // Output projection
+  %Wo = f32[256,256] parameter(4)
+
+  %AttnProj =
+      dot(%AttnOut, %Wo)
+  // [B,S,256]
+
+  // MLP
+  %W1 = f32[256,1024] parameter(5)
+  %W2 = f32[1024,256] parameter(6)
+
+  %Hidden =
+      dot(%AttnProj, %W1)
+  // [B,S,1024]
+
+  %Act = gelu(%Hidden)
+
+  %Output =
+      dot(%Act, %W2)
+  // [B,S,256]
+
+  ROOT %Output
+}
+```
